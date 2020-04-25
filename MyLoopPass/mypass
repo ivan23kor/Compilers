@@ -18,7 +18,7 @@ LIB_DIR="${BUILD_DIR}/lib/LLVMMyLoopPass.so"
 # Clang options
 LL=${SRC%.c}.ll
 LL_NORM=${SRC%.c}_norm.ll
-PASSES="mem2reg,function(loop(indvars),loop-simplify,loop(rotate))"
+PASSES="mem2reg,function(loop(indvars),loop-simplify,loop(rotate),simplify-cfg,instcombine)"
 
 clang -S -emit-llvm ${SRC}
 
