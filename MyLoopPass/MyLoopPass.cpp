@@ -11,15 +11,15 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mylooppass"
 
+std::string toStr(bool Value) {
+  return Value ? "yes" : "no";
+}
+
 namespace {
   int NumLoops = 0; // "Number of loops");
   // int NumLoopNests = 0; // "Number of loop nests");
   // int NumNormalizedLoops = 0; // "Number of normalized loops");
   // int NumPerfectLoops = 0; // "Number of perfect loops");
-
-  inline std::string toStr(bool Value) {
-    return Value ? "yes" : "no";
-  }
 
   class MyLoopPass: public FunctionPass {
   public:
@@ -31,11 +31,10 @@ namespace {
     bool runOnFunction(Function &F) override;
 
     // Could be of depth 1 (zero inner loops)
-    const BasicBlock *processLoopNest(const Loop *L) const;
+    bool processLoopNest(const Loop *L) const;
     int getLoopLevels(const Loop *L) const;
     bool isPerfectNest(const Loop *L) const;
     bool isNormalized(const Loop *L, ScalarEvolution &SE) const;
-    bool isNormalized2(const Loop *L, ScalarEvolution &SE) const;
     bool isRectangularPolyhedron(const Loop *L, ScalarEvolution &SE) const;
   };
 
@@ -48,32 +47,28 @@ namespace {
   bool MyLoopPass::runOnFunction(Function &F) {
     LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
 
-    int count = 0;
-    // for (BasicBlock *BB = &*F.begin(), BE = &*F.end(); BB != BE; ++BB) {
-    for (auto BB = F.begin(), BE = F.end(); BB != BE; ++BB) {
-      if (LI.isLoopHeader(&*BB))
-        processLoopNest(LI.getLoopFor(&*BB));
-      errs() << count++ << ": " << &*BB << "\n";
-      // TODO: make processLoopNest skip to the end of the loop nest and return
-      // an iterator to an exit block
-      break;
+    errs() << "Function " << F.getName() << ":\n";
+    for (const Loop *L: LI.getLoopsInPreorder()) {
+      if (L->getParentLoop() != nullptr) {
+        continue;
+      }
+      processLoopNest(L);
     }
 
     return false;
   }
-}
+} // end anonymous namespace
 
-const BasicBlock* MyLoopPass::processLoopNest(const Loop *L) const {
+bool MyLoopPass::processLoopNest(const Loop *L) const {
   ScalarEvolution &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   errs() << "Loop " << NumLoops++ << ": ";
   errs() << "levels=" << getLoopLevels(L);
-  errs() << ", perfect nest=" << toStr(isPerfectNest(L));
+  // errs() << ", perfect nest=" << toStr(isPerfectNest(L));
   errs() << ", normalized=" << toStr(isNormalized(L, SE));
-  errs() << ", normalized2=" << toStr(isNormalized2(L, SE));
   errs() << ", rectangular polyhedron="
          << toStr(isRectangularPolyhedron(L, SE));
   errs() << "\n\n";
-  return *L->block_end();
+  return false; // haven't changed CFG
 }
 
 // Returns nestedness level of a loop, 1 for one loop
@@ -89,10 +84,10 @@ int MyLoopPass::getLoopLevels(const Loop *L) const {
 // https://github.com/pmodels/bolt-llvm/blob/master/lib/Transforms/Scalar/LoopInterchange.cpp#L640
 bool MyLoopPass::isPerfectNest(const Loop *L) const {
   switch (L->getSubLoops().size()) {
-  case 1:
-    break;
   case 0:
     return true;
+  case 1:
+    break;
   default:
     return false;
   }
@@ -106,8 +101,8 @@ bool MyLoopPass::isPerfectNest(const Loop *L) const {
 
   // Check for infinite loops?
   BranchInst *LHeaderBI = dyn_cast<BranchInst>(LHeader->getTerminator());
-    errs() << "Header branch: ";
-  if (!LHeaderBI) {
+  errs() << "HeaderBI=";
+  if (LHeaderBI == nullptr) {
     errs() << "<empty>\n";
     return false;
   }
@@ -128,20 +123,7 @@ bool MyLoopPass::isPerfectNest(const Loop *L) const {
 // Returns true if and only if all the loops in this nest are normalized:
 // Induction variable starts at 0 an increments by 1
 bool MyLoopPass::isNormalized(const Loop *L, ScalarEvolution &SE) const {
-  if (!L->getCanonicalInductionVariable()) {
-    return false;
-  }
-  // if (!loop->isCanonical(SE)) {
-  //   return false;
-  // }
-  for (auto &SubLoop: L->getSubLoops()) {
-    return isNormalized(SubLoop, SE);
-  }
-  return true;
-}
-
-bool MyLoopPass::isNormalized2(const Loop *L, ScalarEvolution &SE) const {
-  if (!L->isCanonical(SE)) {
+  if (L->getCanonicalInductionVariable() == nullptr) {
     return false;
   }
   for (auto &SubLoop: L->getSubLoops()) {
@@ -153,12 +135,21 @@ bool MyLoopPass::isNormalized2(const Loop *L, ScalarEvolution &SE) const {
 // Checks every level for the rectangularity of the induction variable,
 // assumes the perfection of the nest had been checked
 bool MyLoopPass::isRectangularPolyhedron(const Loop *L, ScalarEvolution &SE) const {
-  int NumSubLoops = L->getSubLoops().size();
-  errs() << "<bounds=" << toStr(L->getBounds(SE).hasValue()) << "> ";
-  if (!L->getBounds(SE) || NumSubLoops > 1) {
+  if (L->getSubLoops().size() > 1) {
+    errs() << "no bounds";
     return false;
   }
-  if (NumSubLoops == 0) {
+
+  Optional< Loop::LoopBounds > bounds = L->getBounds(SE);
+  // errs() << "initial=" << bounds->getInitialIVValue() << "\n";
+  // errs() << "final=" << bounds->getFinalIVValue() << "\n";
+  // errs() << "initial_inv=" << L->isLoopInvariant(&bounds->getInitialIVValue()) << " ";
+  // errs() << "final_inv=" << L->isLoopInvariant(&bounds->getFinalIVValue()) << " ";
+  if (!bounds || !L->isLoopInvariant(&bounds->getFinalIVValue())) {
+    return false;
+  }
+
+  if (L->getSubLoops().empty()) {
     return true;
   }
   return isRectangularPolyhedron(*L->begin(), SE);
