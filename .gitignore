@@ -1,1 +1,6 @@
+# Remove all CMake build subdirs
 */build
+
+# Remove all LLVM IR byproducts
+*.ll
+*.s
